@@ -1088,6 +1088,8 @@ sctp_get_mbuf_for_msg(unsigned int space_needed, int want_header, int how, int a
 #define CMSG_ALIGN(n)   _ALIGN(n)
 #elif defined(__NetBSD__)
 #define CMSG_ALIGN(n)   (((n) + __ALIGNBYTES) & ~__ALIGNBYTES)
+#elif defined(__QNX__)
+#define CMSG_ALIGN(n)   __CMSG_ALIGN(n)
 #elif defined(__APPLE__)
 #if !defined(__DARWIN_ALIGNBYTES)
 #define	__DARWIN_ALIGNBYTES	(sizeof(__darwin_size_t) - 1)
@@ -1158,7 +1160,7 @@ in_broadcast(struct in_addr in)
 	        in.s_addr == htonl(INADDR_ANY));
 }
 
-#if defined(__APPLE__) || defined(__DragonFly__) || defined(__linux__) || defined(__native_client__) || defined(__NetBSD__) || defined(_WIN32) || defined(__Fuchsia__) || defined(__EMSCRIPTEN__)
+#if defined(__APPLE__) || defined(__DragonFly__) || defined(__linux__) || defined(__native_client__) || defined(__NetBSD__) || defined(__QNX__) || defined(_WIN32) || defined(__Fuchsia__) || defined(__EMSCRIPTEN__)
 int
 timingsafe_bcmp(const void *, const void *, size_t);
 #endif
