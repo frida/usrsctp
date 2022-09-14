@@ -82,12 +82,12 @@ elif system == 'qnx'
         '-D_QNX_SOURCE',
     ], language: 'c')
 elif system == 'windows'
+    add_project_arguments('-D_WIN32_WINNT=0x0501', language: 'c')
     dependencies += compiler.find_library('ws2_32', required: true)
     dependencies += compiler.find_library('iphlpapi', required: true)
     if compiler.get_id() == 'gcc'
         add_project_arguments(compiler.get_supported_arguments([
             '-Wno-format',
-            '-D_WIN32_WINNT=0x601',  # Enables inet_ntop and friends
         ]), language: 'c')
     endif
 else
