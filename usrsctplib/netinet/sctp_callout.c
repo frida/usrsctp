@@ -136,7 +136,7 @@ sctp_os_timer_stop(sctp_os_timer_t *c)
 	/*
 	 * Don't attempt to delete a callout that's not on the queue.
 	 */
-	if (!(c->c_flags & SCTP_CALLOUT_PENDING)) {
+	if ((c->c_flags & SCTP_CALLOUT_PENDING) == 0) {
 		c->c_flags &= ~SCTP_CALLOUT_ACTIVE;
 		SCTP_TIMERQ_UNLOCK();
 		return (0);
@@ -148,30 +148,6 @@ sctp_os_timer_stop(sctp_os_timer_t *c)
 	TAILQ_REMOVE(&SCTP_BASE_INFO(callqueue), c, tqe);
 	SCTP_TIMERQ_UNLOCK();
 	return (1);
-}
-
-int
-sctp_get_next_tick(void)
-{
-	int ret;
-	sctp_os_timer_t *c;
-
-	SCTP_TIMERQ_LOCK();
-	c = TAILQ_FIRST(&SCTP_BASE_INFO(callqueue));
-	if (c) {
-		uint32_t min_delta = UINT32_MAX;
-		while (c) {
-			uint32_t delta = c->c_time - ticks;
-			min_delta = (delta < min_delta) ? delta : min_delta;
-			c = TAILQ_NEXT(c, tqe);
-		}
-		ret = min_delta;
-	} else {
-		ret = -1;
-	}
-	SCTP_TIMERQ_UNLOCK();
-
-	return ret;
 }
 
 void

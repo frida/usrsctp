@@ -113,6 +113,7 @@ void  m_freem(struct mbuf *);
 struct m_tag	*m_tag_alloc(uint32_t, int, int, int);
 struct mbuf	*m_copym(struct mbuf *, int, int, int);
 void		 m_copyback(struct mbuf *, int, int, caddr_t);
+int		 m_apply(struct mbuf *, int, int, int (*)(void *, void *, u_int), void *arg);
 struct mbuf	*m_pullup(struct mbuf *, int);
 struct mbuf	*m_pulldown(struct mbuf *, int off, int len, int *offp);
 int		 m_dup_pkthdr(struct mbuf *, struct mbuf *, int);
@@ -326,6 +327,10 @@ extern int max_protohdr; /* Size of largest protocol layer header. See user_mbuf
 			 (!(((m)->m_flags & M_EXT)) ||			\
 			 (*((m)->m_ext.ref_cnt) == 1)) )		\
 
+/* Check if the supplied mbuf has a packet header, or else panic. */
+#define M_ASSERTPKTHDR(m)						\
+	KASSERT((m) != NULL && (m)->m_flags & M_PKTHDR,			\
+	    ("%s: no mbuf packet header!", __func__))
 
 /*
  * Compute the amount of space available before the current start of data in

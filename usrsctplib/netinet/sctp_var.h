@@ -34,7 +34,7 @@
 
 #if defined(__FreeBSD__) && !defined(__Userspace__)
 #include <sys/cdefs.h>
-__FBSDID("$FreeBSD: head/sys/netinet/sctp_var.h 365071 2020-09-01 21:19:14Z mjg $");
+__FBSDID("$FreeBSD$");
 #endif
 
 #ifndef _NETINET_SCTP_VAR_H_
@@ -89,7 +89,7 @@ extern struct pr_usrreqs sctp_usrreqs;
 
 #define	sctp_sbspace(asoc, sb) ((long) ((sctp_maxspace(sb) > (asoc)->sb_cc) ? (sctp_maxspace(sb) - (asoc)->sb_cc) : 0))
 
-#define	sctp_sbspace_failedmsgs(sb) ((long) ((sctp_maxspace(sb) > (sb)->sb_cc) ? (sctp_maxspace(sb) - (sb)->sb_cc) : 0))
+#define	sctp_sbspace_failedmsgs(sb) ((long) ((sctp_maxspace(sb) > SCTP_SBAVAIL(sb)) ? (sctp_maxspace(sb) - SCTP_SBAVAIL(sb)) : 0))
 
 #define sctp_sbspace_sub(a,b) (((a) > (b)) ? ((a) - (b)) : 0)
 
@@ -384,10 +384,10 @@ int sctp_input(struct mbuf **, int *, int);
 void sctp_input(struct mbuf *, int);
 #endif
 #endif
-void sctp_pathmtu_adjustment(struct sctp_tcb *, uint16_t);
+void sctp_pathmtu_adjustment(struct sctp_tcb *, uint32_t, bool);
 #else
 #if defined(__Userspace__)
-void sctp_pathmtu_adjustment(struct sctp_tcb *, uint16_t);
+void sctp_pathmtu_adjustment(struct sctp_tcb *, uint32_t, bool);
 #else
 void sctp_input(struct mbuf *,...);
 #endif
@@ -402,7 +402,9 @@ void sctp_init(uint16_t,
 #elif defined(__APPLE__) && (!defined(APPLE_LEOPARD) && !defined(APPLE_SNOWLEOPARD) &&!defined(APPLE_LION) && !defined(APPLE_MOUNTAINLION))
 void sctp_init(struct protosw *pp, struct domain *dp);
 #else
+#if !defined(__FreeBSD__)
 void sctp_init(void);
+#endif
 void sctp_notify(struct sctp_inpcb *, struct sctp_tcb *, struct sctp_nets *,
     uint8_t, uint8_t, uint16_t, uint32_t);
 #endif

@@ -35,13 +35,16 @@
  * gcc -Wall -std=c99 -pedantic -o rtcweb rtcweb.c -lusrsctp
  */
 
-#include <sys/types.h>
 #ifdef _WIN32
 #define _CRT_SECURE_NO_WARNINGS
-#include <winsock2.h>
-#include <ws2tcpip.h>
-#include <crtdbg.h>
-#else
+#endif
+#include <stdarg.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <errno.h>
+#include <sys/types.h>
+#ifndef _WIN32
 #include <sys/socket.h>
 #include <sys/select.h>
 #include <netinet/in.h>
@@ -49,12 +52,11 @@
 #include <pthread.h>
 #include <unistd.h>
 #include <stdint.h>
+#else
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#include <crtdbg.h>
 #endif
-#include <stdarg.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include <errno.h>
 #include <usrsctp.h>
 #include "programs_helper.h"
 
@@ -307,7 +309,7 @@ request_more_o_streams(struct peer_connection *pc)
 	}
 	memset(&sas, 0, sizeof(struct sctp_add_streams));
 	sas.sas_instrms = 0;
-	sas.sas_outstrms = (uint16_t)o_streams_needed; /* XXX eror handling */
+	sas.sas_outstrms = (uint16_t)o_streams_needed; /* XXX error handling */
 	if (usrsctp_setsockopt(pc->sock, IPPROTO_SCTP, SCTP_ADD_STREAMS, &sas, (socklen_t)sizeof(struct sctp_add_streams)) < 0) {
 		perror("setsockopt");
 	}

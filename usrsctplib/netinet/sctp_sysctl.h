@@ -34,7 +34,7 @@
 
 #if defined(__FreeBSD__) && !defined(__Userspace__)
 #include <sys/cdefs.h>
-__FBSDID("$FreeBSD: head/sys/netinet/sctp_sysctl.h 366750 2020-10-16 10:44:48Z tuexen $");
+__FBSDID("$FreeBSD$");
 #endif
 
 #ifndef _NETINET_SCTP_SYSCTL_H_
@@ -56,7 +56,7 @@ struct sctp_sysctl {
 	uint32_t sctp_nrsack_enable;
 	uint32_t sctp_pktdrop_enable;
 	uint32_t sctp_fr_max_burst_default;
-#if !(defined(__FreeBSD__)  && !defined(__Userspace__))
+#if !(defined(__FreeBSD__) && !defined(__Userspace__))
 	uint32_t sctp_no_csum_on_loopback;
 #endif
 	uint32_t sctp_peer_chunk_oh;
@@ -170,7 +170,7 @@ struct sctp_sysctl {
 #define SCTPCTL_AUTOASCONF_DEFAULT	1
 
 /* autoasconf: Enable SCTP Auto-ASCONF */
-#define SCTPCTL_MULTIPLEASCONFS_DESC	"Enable SCTP Muliple-ASCONFs"
+#define SCTPCTL_MULTIPLEASCONFS_DESC	"Enable SCTP Multiple-ASCONFs"
 #define SCTPCTL_MULTIPLEASCONFS_MIN	0
 #define SCTPCTL_MULTIPLEASCONFS_MAX	1
 #define SCTPCTL_MULTIPLEASCONFS_DEFAULT	SCTP_DEFAULT_MULTIPLE_ASCONFS

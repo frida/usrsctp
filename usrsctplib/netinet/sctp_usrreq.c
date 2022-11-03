@@ -71,14 +71,19 @@ __FBSDID("$FreeBSD$");
 extern const struct sctp_cc_functions sctp_cc_functions[];
 extern const struct sctp_ss_functions sctp_ss_functions[];
 
-void
 #if defined(__Userspace__)
+void
 sctp_init(uint16_t port,
           int (*conn_output)(void *addr, void *buffer, size_t length, uint8_t tos, uint8_t set_df),
           void (*debug_printf)(const char *format, ...), int start_threads)
 #elif defined(__APPLE__) && (!defined(APPLE_LEOPARD) && !defined(APPLE_SNOWLEOPARD) &&!defined(APPLE_LION) && !defined(APPLE_MOUNTAINLION))
+void
 sctp_init(struct protosw *pp SCTP_UNUSED, struct domain *dp SCTP_UNUSED)
+#elif defined(__FreeBSD__)
+static void
+sctp_init(void *arg SCTP_UNUSED)
 #else
+void
 sctp_init(void)
 #endif
 {
@@ -105,7 +110,7 @@ sctp_init(void)
 	 */
 	sb_max_adj = (u_long)((u_quad_t) (SB_MAX) * MCLBYTES / (MSIZE + MCLBYTES));
 	SCTP_BASE_SYSCTL(sctp_sendspace) = min(sb_max_adj,
-	    (((uint32_t)nmbclusters / 2) * SCTP_DEFAULT_MAXSEGMENT));
+	    (((uint32_t)nmbclusters / 2) * MCLBYTES));
 #endif
 	/*
 	 * Now for the recv window, should we take the same amount? or
@@ -160,8 +165,9 @@ sctp_init(void)
 	    sctp_addr_change_event_handler, NULL, EVENTHANDLER_PRI_FIRST);
 #endif
 }
-
 #if defined(__FreeBSD__) && !defined(__Userspace__)
+VNET_SYSINIT(sctp_init, SI_SUB_PROTO_DOMAIN, SI_ORDER_THIRD, sctp_init, NULL);
+
 #ifdef VIMAGE
 static void
 sctp_finish(void *unused __unused)
@@ -198,44 +204,67 @@ sctp_finish(void)
 #endif
 
 void
-sctp_pathmtu_adjustment(struct sctp_tcb *stcb, uint16_t nxtsz)
+sctp_pathmtu_adjustment(struct sctp_tcb *stcb, uint32_t mtu, bool resend)
 {
+	struct sctp_association *asoc;
 	struct sctp_tmit_chunk *chk;
-	uint16_t overhead;
+	uint32_t overhead;
 
-	/* Adjust that too */
-	stcb->asoc.smallest_mtu = nxtsz;
-	/* now off to subtract IP_DF flag if needed */
-	overhead = IP_HDR_SIZE + sizeof(struct sctphdr);
-	if (sctp_auth_is_required_chunk(SCTP_DATA, stcb->asoc.peer_auth_chunks)) {
-		overhead += sctp_get_auth_chunk_len(stcb->asoc.peer_hmac_id);
+	asoc = &stcb->asoc;
+	KASSERT(mtu < asoc->smallest_mtu,
+	        ("Currently only reducing association MTU %u supported (MTU %u)",
+	        asoc->smallest_mtu, mtu));
+	asoc->smallest_mtu = mtu;
+	if (stcb->sctp_ep->sctp_flags & SCTP_PCB_FLAGS_BOUND_V6) {
+		overhead = SCTP_MIN_OVERHEAD;
+	} else {
+#if defined(__Userspace__)
+		if (stcb->sctp_ep->sctp_flags & SCTP_PCB_FLAGS_BOUND_CONN) {
+			overhead = sizeof(struct sctphdr);
+		} else {
+			overhead = SCTP_MIN_V4_OVERHEAD;
+		}
+#else
+		overhead = SCTP_MIN_V4_OVERHEAD;
+#endif
 	}
-	TAILQ_FOREACH(chk, &stcb->asoc.send_queue, sctp_next) {
-		if ((chk->send_size + overhead) > nxtsz) {
+	if (asoc->idata_supported) {
+		if (sctp_auth_is_required_chunk(SCTP_IDATA, asoc->peer_auth_chunks)) {
+			overhead += sctp_get_auth_chunk_len(asoc->peer_hmac_id);
+		}
+	} else {
+		if (sctp_auth_is_required_chunk(SCTP_DATA, asoc->peer_auth_chunks)) {
+			overhead += sctp_get_auth_chunk_len(asoc->peer_hmac_id);
+		}
+	}
+	KASSERT(overhead % 4 == 0,
+	        ("overhead (%u) not a multiple of 4", overhead));
+	TAILQ_FOREACH(chk, &asoc->send_queue, sctp_next) {
+		if (((uint32_t)chk->send_size + overhead) > mtu) {
 			chk->flags |= CHUNK_FLAGS_FRAGMENT_OK;
 		}
 	}
-	TAILQ_FOREACH(chk, &stcb->asoc.sent_queue, sctp_next) {
-		if ((chk->send_size + overhead) > nxtsz) {
-			/*
-			 * For this guy we also mark for immediate resend
-			 * since we sent to big of chunk
-			 */
+	TAILQ_FOREACH(chk, &asoc->sent_queue, sctp_next) {
+		if (((uint32_t)chk->send_size + overhead) > mtu) {
 			chk->flags |= CHUNK_FLAGS_FRAGMENT_OK;
-			if (chk->sent < SCTP_DATAGRAM_RESEND) {
+			if (resend && chk->sent < SCTP_DATAGRAM_RESEND) {
+				/*
+				 * If requested, mark the chunk for immediate
+				 * resend, since we sent it being too big.
+				 */
 				sctp_flight_size_decrease(chk);
 				sctp_total_flight_decrease(stcb, chk);
 				chk->sent = SCTP_DATAGRAM_RESEND;
-				sctp_ucount_incr(stcb->asoc.sent_queue_retran_cnt);
+				sctp_ucount_incr(asoc->sent_queue_retran_cnt);
 				chk->rec.data.doing_fast_retransmit = 0;
 				if (SCTP_BASE_SYSCTL(sctp_logging_level) & SCTP_FLIGHT_LOGGING_ENABLE) {
 					sctp_misc_ints(SCTP_FLIGHT_LOG_DOWN_PMTU,
-						       chk->whoTo->flight_size,
-						       chk->book_size,
-						       (uint32_t)(uintptr_t)chk->whoTo,
-						       chk->rec.data.tsn);
+					               chk->whoTo->flight_size,
+					               chk->book_size,
+					               (uint32_t)(uintptr_t)chk->whoTo,
+					               chk->rec.data.tsn);
 				}
-				/* Clear any time so NO RTT is being done */
+				/* Clear any time, so NO RTT is being done. */
 				if (chk->do_rtt == 1) {
 					chk->do_rtt = 0;
 					chk->whoTo->rto_needed = 1;
@@ -346,7 +375,7 @@ sctp_notify(struct sctp_inpcb *inp,
 		}
 		/* Update the association MTU */
 		if (stcb->asoc.smallest_mtu > next_mtu) {
-			sctp_pathmtu_adjustment(stcb, next_mtu);
+			sctp_pathmtu_adjustment(stcb, next_mtu, true);
 		}
 		/* Finally, start the PMTU timer if it was running before. */
 		if (timer_stopped) {
@@ -472,7 +501,7 @@ sctp_ctlinput(int cmd, struct sockaddr *sa, void *vip)
 #endif
 			            (uint32_t)ntohs(icmp->icmp_nextmtu));
 #if defined(__Userspace__)
-			if (!(stcb->sctp_ep->sctp_flags & SCTP_PCB_FLAGS_SOCKET_GONE) &&
+			if (((stcb->sctp_ep->sctp_flags & SCTP_PCB_FLAGS_SOCKET_GONE) == 0) &&
 			    (stcb->sctp_socket != NULL)) {
 				struct socket *upcall_socket;
 
@@ -612,14 +641,14 @@ sctp_abort(struct socket *so)
 #endif
 		SCTP_INP_WUNLOCK(inp);
 		sctp_inpcb_free(inp, SCTP_FREE_SHOULD_USE_ABORT,
-				SCTP_CALLED_AFTER_CMPSET_OFCLOSE);
+		                SCTP_CALLED_AFTER_CMPSET_OFCLOSE);
 		SOCK_LOCK(so);
+#if defined(__FreeBSD__) && !defined(__Userspace__)
+		KASSERT(!SOLISTENING(so),
+		        ("sctp_abort: called on listening socket %p", so));
+#endif
 		SCTP_SB_CLEAR(so->so_snd);
-		/* same for the rcv ones, they are only
-		 * here for the accounting/select.
-		 */
 		SCTP_SB_CLEAR(so->so_rcv);
-
 #if defined(__APPLE__) && !defined(__Userspace__)
 		so->so_usecount--;
 #else
@@ -814,10 +843,10 @@ sctp_close(struct socket *so)
 		inp->sctp_flags |= SCTP_PCB_FLAGS_SOCKET_GONE | SCTP_PCB_FLAGS_CLOSE_IP;
 #if defined(__Userspace__)
 		if (((so->so_options & SCTP_SO_LINGER) && (so->so_linger == 0)) ||
-		    (so->so_rcv.sb_cc > 0)) {
+		    (SCTP_SBAVAIL(&so->so_rcv) > 0)) {
 #else
 		if (((so->so_options & SO_LINGER) && (so->so_linger == 0)) ||
-		    (so->so_rcv.sb_cc > 0)) {
+		    (SCTP_SBAVAIL(&so->so_rcv) > 0)) {
 #endif
 #ifdef SCTP_LOG_CLOSING
 			sctp_log_closing(inp, NULL, 13);
@@ -837,12 +866,15 @@ sctp_close(struct socket *so)
 		 * the state of the SCTP association.
 		 */
 		SOCK_LOCK(so);
+#if defined(__FreeBSD__) && !defined(__Userspace__)
+		if (!SOLISTENING(so)) {
+			SCTP_SB_CLEAR(so->so_snd);
+			SCTP_SB_CLEAR(so->so_rcv);
+		}
+#else
 		SCTP_SB_CLEAR(so->so_snd);
-		/* same for the rcv ones, they are only
-		 * here for the accounting/select.
-		 */
 		SCTP_SB_CLEAR(so->so_rcv);
-
+#endif
 #if !(defined(__APPLE__) && !defined(__Userspace__))
 		/* Now null out the reference, we are completely detached. */
 		so->so_pcb = NULL;
@@ -880,10 +912,10 @@ sctp_detach(struct socket *so)
 	    (atomic_cmpset_int(&inp->sctp_flags, flags, (flags | SCTP_PCB_FLAGS_SOCKET_GONE | SCTP_PCB_FLAGS_CLOSE_IP)))) {
 #if defined(__Userspace__)
 		if (((so->so_options & SCTP_SO_LINGER) && (so->so_linger == 0)) ||
-		    (so->so_rcv.sb_cc > 0)) {
+		    (SCTP_SBAVAIL(&so->so_rcv) > 0)) {
 #else
 		if (((so->so_options & SO_LINGER) && (so->so_linger == 0)) ||
-		    (so->so_rcv.sb_cc > 0)) {
+		    (SCTP_SBAVAIL(&so->so_rcv) > 0)) {
 #endif
 #ifdef SCTP_LOG_CLOSING
 			sctp_log_closing(inp, NULL, 13);
@@ -1084,13 +1116,11 @@ sctp_disconnect(struct socket *so)
 			NET_EPOCH_ENTER(et);
 #endif
 #if defined(__Userspace__)
-			if (((so->so_options & SCTP_SO_LINGER) &&
-			     (so->so_linger == 0)) ||
-			    (so->so_rcv.sb_cc > 0)) {
+			if (((so->so_options & SCTP_SO_LINGER) && (so->so_linger == 0)) ||
+			    (SCTP_SBAVAIL(&so->so_rcv) > 0)) {
 #else
-			if (((so->so_options & SO_LINGER) &&
-			     (so->so_linger == 0)) ||
-			    (so->so_rcv.sb_cc > 0)) {
+			if (((so->so_options & SO_LINGER) && (so->so_linger == 0)) ||
+			    (SCTP_SBAVAIL(&so->so_rcv) > 0)) {
 #endif
 				if (SCTP_GET_STATE(stcb) != SCTP_STATE_COOKIE_WAIT) {
 					/* Left with Data unread */
@@ -1234,17 +1264,25 @@ sctp_flush(struct socket *so, int how)
 		inp->sctp_flags |= SCTP_PCB_FLAGS_SOCKET_CANT_READ;
 		SCTP_INP_READ_UNLOCK(inp);
 		SCTP_INP_WUNLOCK(inp);
-		so->so_rcv.sb_cc = 0;
-		so->so_rcv.sb_mbcnt = 0;
-		so->so_rcv.sb_mb = NULL;
+		SOCK_LOCK(so);
+#if defined(__FreeBSD__) && !defined(__Userspace__)
+		KASSERT(!SOLISTENING(so),
+		        ("sctp_flush: called on listening socket %p", so));
+#endif
+		SCTP_SB_CLEAR(so->so_rcv);
+		SOCK_UNLOCK(so);
 	}
 	if ((how == PRU_FLUSH_WR) || (how == PRU_FLUSH_RDWR)) {
 		/* First make sure the sb will be happy, we don't
 		 * use these except maybe the count
 		 */
-		so->so_snd.sb_cc = 0;
-		so->so_snd.sb_mbcnt = 0;
-		so->so_snd.sb_mb = NULL;
+		SOCK_LOCK(so);
+#if defined(__FreeBSD__) && !defined(__Userspace__)
+		KASSERT(!SOLISTENING(so),
+		        ("sctp_flush: called on listening socket %p", so));
+#endif
+		SCTP_SB_CLEAR(so->so_snd);
+		SOCK_UNLOCK(so);
 	}
 	return (0);
 }
@@ -1550,7 +1588,7 @@ sctp_fill_up_addresses_vrf(struct sctp_inpcb *inp,
 						sin = &sctp_ifa->address.sin;
 						if (sin->sin_addr.s_addr == 0) {
 							/*
-							 * we skip unspecifed
+							 * we skip unspecified
 							 * addresses
 							 */
 							continue;
@@ -1602,7 +1640,7 @@ sctp_fill_up_addresses_vrf(struct sctp_inpcb *inp,
 						sin6 = &sctp_ifa->address.sin6;
 						if (IN6_IS_ADDR_UNSPECIFIED(&sin6->sin6_addr)) {
 							/*
-							 * we skip unspecifed
+							 * we skip unspecified
 							 * addresses
 							 */
 							continue;
@@ -1751,7 +1789,7 @@ sctp_fill_up_addresses(struct sctp_inpcb *inp,
                        size_t limit,
                        struct sockaddr *addr)
 {
-	size_t size = 0;
+	size_t size;
 #ifdef SCTP_MVRF
 	uint32_t id;
 #endif
@@ -1763,6 +1801,7 @@ sctp_fill_up_addresses(struct sctp_inpcb *inp,
  * in more than one VRF.
  */
 	/* fill up addresses for all VRFs on the endpoint */
+	size = 0;
 	for (id = 0; (id < inp->num_vrfs) && (size < limit); id++) {
 		size += sctp_fill_up_addresses_vrf(inp, stcb, limit, addr,
 		                                   inp->m_vrf_ids[id]);
@@ -1777,17 +1816,17 @@ sctp_fill_up_addresses(struct sctp_inpcb *inp,
 	return (size);
 }
 
-static int
-sctp_count_max_addresses_vrf(struct sctp_inpcb *inp, uint32_t vrf_id)
+static size_t
+sctp_max_size_addresses_vrf(struct sctp_inpcb *inp, uint32_t vrf_id)
 {
-	int cnt = 0;
-	struct sctp_vrf *vrf = NULL;
+	struct sctp_vrf *vrf;
+	size_t size;
 
 	/*
-	 * In both sub-set bound an bound_all cases we return the MAXIMUM
-	 * number of addresses that you COULD get. In reality the sub-set
-	 * bound may have an exclusion list for a given TCB OR in the
-	 * bound-all case a TCB may NOT include the loopback or other
+	 * In both sub-set bound an bound_all cases we return the size of
+	 * the maximum number of addresses that you could get. In reality
+	 * the sub-set bound may have an exclusion list for a given TCB or
+	 * in the bound-all case a TCB may NOT include the loopback or other
 	 * addresses as well.
 	 */
 	SCTP_IPI_ADDR_LOCK_ASSERT();
@@ -1795,6 +1834,7 @@ sctp_count_max_addresses_vrf(struct sctp_inpcb *inp, uint32_t vrf_id)
 	if (vrf == NULL) {
 		return (0);
 	}
+	size = 0;
 	if (inp->sctp_flags & SCTP_PCB_FLAGS_BOUNDALL) {
 		struct sctp_ifn *sctp_ifn;
 		struct sctp_ifa *sctp_ifa;
@@ -1807,22 +1847,22 @@ sctp_count_max_addresses_vrf(struct sctp_inpcb *inp, uint32_t vrf_id)
 				case AF_INET:
 #ifdef INET6
 					if (sctp_is_feature_on(inp, SCTP_PCB_FLAGS_NEEDS_MAPPED_V4))
-						cnt += sizeof(struct sockaddr_in6);
+						size += sizeof(struct sockaddr_in6);
 					else
-						cnt += sizeof(struct sockaddr_in);
+						size += sizeof(struct sockaddr_in);
 #else
-					cnt += sizeof(struct sockaddr_in);
+					size += sizeof(struct sockaddr_in);
 #endif
 					break;
 #endif
 #ifdef INET6
 				case AF_INET6:
-					cnt += sizeof(struct sockaddr_in6);
+					size += sizeof(struct sockaddr_in6);
 					break;
 #endif
 #if defined(__Userspace__)
 				case AF_CONN:
-					cnt += sizeof(struct sockaddr_conn);
+					size += sizeof(struct sockaddr_conn);
 					break;
 #endif
 				default:
@@ -1839,22 +1879,22 @@ sctp_count_max_addresses_vrf(struct sctp_inpcb *inp, uint32_t vrf_id)
 			case AF_INET:
 #ifdef INET6
 				if (sctp_is_feature_on(inp, SCTP_PCB_FLAGS_NEEDS_MAPPED_V4))
-					cnt += sizeof(struct sockaddr_in6);
+					size += sizeof(struct sockaddr_in6);
 				else
-					cnt += sizeof(struct sockaddr_in);
+					size += sizeof(struct sockaddr_in);
 #else
-				cnt += sizeof(struct sockaddr_in);
+				size += sizeof(struct sockaddr_in);
 #endif
 				break;
 #endif
 #ifdef INET6
 			case AF_INET6:
-				cnt += sizeof(struct sockaddr_in6);
+				size += sizeof(struct sockaddr_in6);
 				break;
 #endif
 #if defined(__Userspace__)
 			case AF_CONN:
-				cnt += sizeof(struct sockaddr_conn);
+				size += sizeof(struct sockaddr_conn);
 				break;
 #endif
 			default:
@@ -1862,13 +1902,13 @@ sctp_count_max_addresses_vrf(struct sctp_inpcb *inp, uint32_t vrf_id)
 			}
 		}
 	}
-	return (cnt);
+	return (size);
 }
 
-static int
-sctp_count_max_addresses(struct sctp_inpcb *inp)
+static size_t
+sctp_max_size_addresses(struct sctp_inpcb *inp)
 {
-	int cnt = 0;
+	size_t size;
 #ifdef SCTP_MVRF
 	int id;
 #endif
@@ -1879,16 +1919,17 @@ sctp_count_max_addresses(struct sctp_inpcb *inp)
  * FIX ME: ?? this WILL count duplicate addresses if they appear
  * in more than one VRF.
  */
-	/* count addresses for all VRFs on the endpoint */
+	/* Maximum size of all addresses for all VRFs on the endpoint */
+	size = 0;
 	for (id = 0; id < inp->num_vrfs; id++) {
-		cnt += sctp_count_max_addresses_vrf(inp, inp->m_vrf_ids[id]);
+		size += sctp_max_size_addresses_vrf(inp, inp->m_vrf_ids[id]);
 	}
 #else
-	/* count addresses for the endpoint's default VRF */
-	cnt = sctp_count_max_addresses_vrf(inp, inp->def_vrf_id);
+	/* Maximum size of all addresses for the endpoint's default VRF */
+	size = sctp_max_size_addresses_vrf(inp, inp->def_vrf_id);
 #endif
 	SCTP_IPI_ADDR_RUNLOCK();
-	return (cnt);
+	return (size);
 }
 
 static int
@@ -1966,8 +2007,7 @@ sctp_do_connect_x(struct socket *so, struct sctp_inpcb *inp, void *optval,
 		}
 	}
 #endif				/* INET6 */
-	if ((inp->sctp_flags & SCTP_PCB_FLAGS_UNBOUND) ==
-	    SCTP_PCB_FLAGS_UNBOUND) {
+	if (inp->sctp_flags & SCTP_PCB_FLAGS_UNBOUND) {
 		/* Bind a ephemeral port */
 		error = sctp_inpcb_bind(so, NULL, NULL, p);
 		if (error) {
@@ -2621,13 +2661,12 @@ sctp_getopt(struct socket *so, int optname, void *optval, size_t *optsize,
 	case SCTP_MAXSEG:
 	{
 		struct sctp_assoc_value *av;
-		int ovh;
 
 		SCTP_CHECK_AND_CAST(av, optval, struct sctp_assoc_value, *optsize);
 		SCTP_FIND_STCB(inp, stcb, av->assoc_id);
 
 		if (stcb) {
-			av->assoc_value = sctp_get_frag_point(stcb, &stcb->asoc);
+			av->assoc_value = stcb->asoc.sctp_frag_point;
 			SCTP_TCB_UNLOCK(stcb);
 		} else {
 			if ((inp->sctp_flags & SCTP_PCB_FLAGS_TCPTYPE) ||
@@ -2635,15 +2674,7 @@ sctp_getopt(struct socket *so, int optname, void *optval, size_t *optsize,
 			    ((inp->sctp_flags & SCTP_PCB_FLAGS_UDPTYPE) &&
 			     (av->assoc_id == SCTP_FUTURE_ASSOC))) {
 				SCTP_INP_RLOCK(inp);
-				if (inp->sctp_flags & SCTP_PCB_FLAGS_BOUND_V6) {
-					ovh = SCTP_MED_OVERHEAD;
-				} else {
-					ovh = SCTP_MED_V4_OVERHEAD;
-				}
-				if (inp->sctp_frag_point >= SCTP_DEFAULT_MAXSEGMENT)
-					av->assoc_value = 0;
-				else
-					av->assoc_value = inp->sctp_frag_point - ovh;
+				av->assoc_value = inp->sctp_frag_point;
 				SCTP_INP_RUNLOCK(inp);
 			} else {
 				SCTP_LTRACE_ERR_RET(inp, NULL, NULL, SCTP_FROM_SCTP_USRREQ, EINVAL);
@@ -2730,7 +2761,7 @@ sctp_getopt(struct socket *so, int optname, void *optval, size_t *optsize,
 
 		SCTP_CHECK_AND_CAST(value, optval, uint32_t, *optsize);
 		SCTP_INP_RLOCK(inp);
-		*value = sctp_count_max_addresses(inp);
+		*value = (uint32_t)sctp_max_size_addresses(inp);
 		SCTP_INP_RUNLOCK(inp);
 		*optsize = sizeof(uint32_t);
 		break;
@@ -2738,14 +2769,14 @@ sctp_getopt(struct socket *so, int optname, void *optval, size_t *optsize,
 	case SCTP_GET_REMOTE_ADDR_SIZE:
 	{
 		uint32_t *value;
-		size_t size;
 		struct sctp_nets *net;
+		size_t size;
 
 		SCTP_CHECK_AND_CAST(value, optval, uint32_t, *optsize);
 		/* FIXME MT: change to sctp_assoc_value? */
-		SCTP_FIND_STCB(inp, stcb, (sctp_assoc_t) *value);
+		SCTP_FIND_STCB(inp, stcb, (sctp_assoc_t)*value);
 
-		if (stcb) {
+		if (stcb != NULL) {
 			size = 0;
 			/* Count the sizes */
 			TAILQ_FOREACH(net, &stcb->asoc.nets, sctp_next) {
@@ -2778,11 +2809,16 @@ sctp_getopt(struct socket *so, int optname, void *optval, size_t *optsize,
 				}
 			}
 			SCTP_TCB_UNLOCK(stcb);
-			*value = (uint32_t) size;
+			*value = (uint32_t)size;
 			*optsize = sizeof(uint32_t);
 		} else {
-			SCTP_LTRACE_ERR_RET(inp, NULL, NULL, SCTP_FROM_SCTP_USRREQ, ENOTCONN);
-			error = ENOTCONN;
+			if ((inp->sctp_flags & SCTP_PCB_FLAGS_UDPTYPE) &&
+			    ((sctp_assoc_t)*value <= SCTP_ALL_ASSOC)) {
+				error = EINVAL;
+			} else {
+				error = ENOENT;
+			}
+			SCTP_LTRACE_ERR_RET(inp, NULL, NULL, SCTP_FROM_SCTP_USRREQ, error);
 		}
 		break;
 	}
@@ -2800,7 +2836,7 @@ sctp_getopt(struct socket *so, int optname, void *optval, size_t *optsize,
 		SCTP_CHECK_AND_CAST(saddr, optval, struct sctp_getaddresses, *optsize);
 		SCTP_FIND_STCB(inp, stcb, saddr->sget_assoc_id);
 
-		if (stcb) {
+		if (stcb != NULL) {
 			left = *optsize - offsetof(struct sctp_getaddresses, addr);
 			*optsize = offsetof(struct sctp_getaddresses, addr);
 			addr = &saddr->addr[0].sa;
@@ -2861,8 +2897,13 @@ sctp_getopt(struct socket *so, int optname, void *optval, size_t *optsize,
 			}
 			SCTP_TCB_UNLOCK(stcb);
 		} else {
-			SCTP_LTRACE_ERR_RET(inp, NULL, NULL, SCTP_FROM_SCTP_USRREQ, ENOENT);
-			error = ENOENT;
+			if ((inp->sctp_flags & SCTP_PCB_FLAGS_UDPTYPE) &&
+			    (saddr->sget_assoc_id <= SCTP_ALL_ASSOC)) {
+				error = EINVAL;
+			} else {
+				error = ENOENT;
+			}
+			SCTP_LTRACE_ERR_RET(inp, NULL, NULL, SCTP_FROM_SCTP_USRREQ, error);
 		}
 		break;
 	}
@@ -2874,12 +2915,18 @@ sctp_getopt(struct socket *so, int optname, void *optval, size_t *optsize,
 		SCTP_CHECK_AND_CAST(saddr, optval, struct sctp_getaddresses, *optsize);
 		SCTP_FIND_STCB(inp, stcb, saddr->sget_assoc_id);
 
-		limit = *optsize - offsetof(struct sctp_getaddresses, addr);
-		actual = sctp_fill_up_addresses(inp, stcb, limit, &saddr->addr[0].sa);
-		if (stcb) {
+		if ((inp->sctp_flags & SCTP_PCB_FLAGS_UDPTYPE) &&
+		    ((saddr->sget_assoc_id == SCTP_CURRENT_ASSOC) ||
+		     (saddr->sget_assoc_id == SCTP_ALL_ASSOC))) {
+			error = EINVAL;
+		} else {
+			limit = *optsize - offsetof(struct sctp_getaddresses, addr);
+			actual = sctp_fill_up_addresses(inp, stcb, limit, &saddr->addr[0].sa);
+			*optsize = offsetof(struct sctp_getaddresses, addr) + actual;
+		}
+		if (stcb != NULL) {
 			SCTP_TCB_UNLOCK(stcb);
 		}
-		*optsize = offsetof(struct sctp_getaddresses, addr) + actual;
 		break;
 	}
 	case SCTP_PEER_ADDR_PARAMS:
@@ -3223,7 +3270,7 @@ sctp_getopt(struct socket *so, int optname, void *optval, size_t *optsize,
 					 stcb->asoc.cnt_on_all_streams);
 		sstat->sstat_instrms = stcb->asoc.streamincnt;
 		sstat->sstat_outstrms = stcb->asoc.streamoutcnt;
-		sstat->sstat_fragmentation_point = sctp_get_frag_point(stcb, &stcb->asoc);
+		sstat->sstat_fragmentation_point = sctp_get_frag_point(stcb);
 		net = stcb->asoc.primary_destination;
 		if (net != NULL) {
 #ifdef HAVE_SA_LEN
@@ -4497,7 +4544,7 @@ sctp_setopt(struct socket *so, int optname, void *optval, size_t optsize,
 	case SCTP_REUSE_PORT:
 	{
 		SCTP_CHECK_AND_CAST(mopt, optval, uint32_t, optsize);
-		if ((inp->sctp_flags & SCTP_PCB_FLAGS_UNBOUND)  == 0) {
+		if ((inp->sctp_flags & SCTP_PCB_FLAGS_UNBOUND) == 0) {
 			/* Can't set it after we are bound */
 			error = EINVAL;
 			break;
@@ -4568,7 +4615,7 @@ sctp_setopt(struct socket *so, int optname, void *optval, size_t optsize,
 				if (av->assoc_value == 0) {
 					inp->idata_supported = 0;
 				} else {
-					if ((sctp_is_feature_on(inp, SCTP_PCB_FLAGS_FRAG_INTERLEAVE))  &&
+					if ((sctp_is_feature_on(inp, SCTP_PCB_FLAGS_FRAG_INTERLEAVE)) &&
 					    (sctp_is_feature_on(inp, SCTP_PCB_FLAGS_INTERLEAVE_STRMS))) {
 						inp->idata_supported = 1;
 					} else {
@@ -4729,12 +4776,10 @@ sctp_setopt(struct socket *so, int optname, void *optval, size_t optsize,
 		}
 		SCTP_FIND_STCB(inp, stcb, av->assoc_id);
 		if (stcb) {
-			SCTP_TCB_SEND_LOCK(stcb);
 			stcb->asoc.ss_functions.sctp_ss_clear(stcb, &stcb->asoc, true);
 			stcb->asoc.ss_functions = sctp_ss_functions[av->assoc_value];
 			stcb->asoc.stream_scheduling_module = av->assoc_value;
 			stcb->asoc.ss_functions.sctp_ss_init(stcb, &stcb->asoc);
-			SCTP_TCB_SEND_UNLOCK(stcb);
 			SCTP_TCB_UNLOCK(stcb);
 		} else {
 			if ((inp->sctp_flags & SCTP_PCB_FLAGS_TCPTYPE) ||
@@ -4752,12 +4797,10 @@ sctp_setopt(struct socket *so, int optname, void *optval, size_t optsize,
 				SCTP_INP_RLOCK(inp);
 				LIST_FOREACH(stcb, &inp->sctp_asoc_list, sctp_tcblist) {
 					SCTP_TCB_LOCK(stcb);
-					SCTP_TCB_SEND_LOCK(stcb);
 					stcb->asoc.ss_functions.sctp_ss_clear(stcb, &stcb->asoc, true);
 					stcb->asoc.ss_functions = sctp_ss_functions[av->assoc_value];
 					stcb->asoc.stream_scheduling_module = av->assoc_value;
 					stcb->asoc.ss_functions.sctp_ss_init(stcb, &stcb->asoc);
-					SCTP_TCB_SEND_UNLOCK(stcb);
 					SCTP_TCB_UNLOCK(stcb);
 				}
 				SCTP_INP_RUNLOCK(inp);
@@ -5743,22 +5786,12 @@ sctp_setopt(struct socket *so, int optname, void *optval, size_t optsize,
 	case SCTP_MAXSEG:
 	{
 		struct sctp_assoc_value *av;
-		int ovh;
 
 		SCTP_CHECK_AND_CAST(av, optval, struct sctp_assoc_value, optsize);
 		SCTP_FIND_STCB(inp, stcb, av->assoc_id);
 
-		if (inp->sctp_flags & SCTP_PCB_FLAGS_BOUND_V6) {
-			ovh = SCTP_MED_OVERHEAD;
-		} else {
-			ovh = SCTP_MED_V4_OVERHEAD;
-		}
 		if (stcb) {
-			if (av->assoc_value) {
-				stcb->asoc.sctp_frag_point = (av->assoc_value + ovh);
-			} else {
-				stcb->asoc.sctp_frag_point = SCTP_DEFAULT_MAXSEGMENT;
-			}
+			stcb->asoc.sctp_frag_point = av->assoc_value;
 			SCTP_TCB_UNLOCK(stcb);
 		} else {
 			if ((inp->sctp_flags & SCTP_PCB_FLAGS_TCPTYPE) ||
@@ -5766,12 +5799,7 @@ sctp_setopt(struct socket *so, int optname, void *optval, size_t optsize,
 			    ((inp->sctp_flags & SCTP_PCB_FLAGS_UDPTYPE) &&
 			     (av->assoc_id == SCTP_FUTURE_ASSOC))) {
 				SCTP_INP_WLOCK(inp);
-				/* FIXME MT: I think this is not in tune with the API ID */
-				if (av->assoc_value) {
-					inp->sctp_frag_point = (av->assoc_value + ovh);
-				} else {
-					inp->sctp_frag_point = SCTP_DEFAULT_MAXSEGMENT;
-				}
+				inp->sctp_frag_point = av->assoc_value;
 				SCTP_INP_WUNLOCK(inp);
 			} else {
 				SCTP_LTRACE_ERR_RET(inp, NULL, NULL, SCTP_FROM_SCTP_USRREQ, EINVAL);
@@ -5852,9 +5880,7 @@ sctp_setopt(struct socket *so, int optname, void *optval, size_t optsize,
 		} else {
 			sctp_feature_off(inp, SCTP_PCB_FLAGS_STREAM_RESETEVNT);
 		}
-		SCTP_INP_WUNLOCK(inp);
 
-		SCTP_INP_RLOCK(inp);
 		LIST_FOREACH(stcb, &inp->sctp_asoc_list, sctp_tcblist) {
 			SCTP_TCB_LOCK(stcb);
 			if (events->sctp_association_event) {
@@ -5911,21 +5937,21 @@ sctp_setopt(struct socket *so, int optname, void *optval, size_t optsize,
 		}
 		/* Send up the sender dry event only for 1-to-1 style sockets. */
 		if (events->sctp_sender_dry_event) {
-			if ((inp->sctp_flags & SCTP_PCB_FLAGS_TCPTYPE) ||
-			    (inp->sctp_flags & SCTP_PCB_FLAGS_IN_TCPPOOL)) {
+			if (((inp->sctp_flags & (SCTP_PCB_FLAGS_TCPTYPE | SCTP_PCB_FLAGS_IN_TCPPOOL)) != 0) &&
+			    !SCTP_IS_LISTENING(inp)) {
 				stcb = LIST_FIRST(&inp->sctp_asoc_list);
-				if (stcb) {
+				if (stcb != NULL) {
 					SCTP_TCB_LOCK(stcb);
 					if (TAILQ_EMPTY(&stcb->asoc.send_queue) &&
 					    TAILQ_EMPTY(&stcb->asoc.sent_queue) &&
 					    (stcb->asoc.stream_queue_cnt == 0)) {
-						sctp_ulp_notify(SCTP_NOTIFY_SENDER_DRY, stcb,  0, NULL, SCTP_SO_LOCKED);
+						sctp_ulp_notify(SCTP_NOTIFY_SENDER_DRY, stcb, 0, NULL, SCTP_SO_LOCKED);
 					}
 					SCTP_TCB_UNLOCK(stcb);
 				}
 			}
 		}
-		SCTP_INP_RUNLOCK(inp);
+		SCTP_INP_WUNLOCK(inp);
 		break;
 	}
 	case SCTP_ADAPTATION_LAYER:
@@ -6112,10 +6138,10 @@ sctp_setopt(struct socket *so, int optname, void *optval, size_t optsize,
 			if (net != NULL) {
 				/************************NET SPECIFIC SET ******************/
 				if (paddrp->spp_flags & SPP_HB_DISABLE) {
-					if (!(net->dest_state & SCTP_ADDR_UNCONFIRMED) &&
-					    !(net->dest_state & SCTP_ADDR_NOHB)) {
+					if (((net->dest_state & SCTP_ADDR_UNCONFIRMED) == 0) &&
+					    ((net->dest_state & SCTP_ADDR_NOHB) == 0)) {
 						sctp_timer_stop(SCTP_TIMER_TYPE_HEARTBEAT, inp, stcb, net,
-								SCTP_FROM_SCTP_USRREQ + SCTP_LOC_9);
+						                SCTP_FROM_SCTP_USRREQ + SCTP_LOC_9);
 					}
 					net->dest_state |= SCTP_ADDR_NOHB;
 				}
@@ -6140,7 +6166,7 @@ sctp_setopt(struct socket *so, int optname, void *optval, size_t optsize,
 				if (paddrp->spp_flags & SPP_PMTUD_DISABLE) {
 					if (SCTP_OS_TIMER_PENDING(&net->pmtu_timer.timer)) {
 						sctp_timer_stop(SCTP_TIMER_TYPE_PATHMTURAISE, inp, stcb, net,
-								SCTP_FROM_SCTP_USRREQ + SCTP_LOC_11);
+						                SCTP_FROM_SCTP_USRREQ + SCTP_LOC_11);
 					}
 					net->dest_state |= SCTP_ADDR_NO_PMTUD;
 					if (paddrp->spp_pathmtu > 0) {
@@ -6165,7 +6191,7 @@ sctp_setopt(struct socket *so, int optname, void *optval, size_t optsize,
 							break;
 						}
 						if (net->mtu < stcb->asoc.smallest_mtu) {
-							sctp_pathmtu_adjustment(stcb, net->mtu);
+							sctp_pathmtu_adjustment(stcb, net->mtu, true);
 						}
 					}
 				}
@@ -6274,9 +6300,9 @@ sctp_setopt(struct socket *so, int optname, void *optval, size_t optsize,
 				}
 				if (paddrp->spp_flags & SPP_HB_DISABLE) {
 					TAILQ_FOREACH(net, &stcb->asoc.nets, sctp_next) {
-						if (!(net->dest_state & SCTP_ADDR_NOHB)) {
+						if ((net->dest_state & SCTP_ADDR_NOHB) == 0) {
 							net->dest_state |= SCTP_ADDR_NOHB;
-							if (!(net->dest_state & SCTP_ADDR_UNCONFIRMED)) {
+							if ((net->dest_state & SCTP_ADDR_UNCONFIRMED) == 0) {
 								sctp_timer_stop(SCTP_TIMER_TYPE_HEARTBEAT,
 								                inp, stcb, net,
 								                SCTP_FROM_SCTP_USRREQ + SCTP_LOC_15);
@@ -6289,7 +6315,7 @@ sctp_setopt(struct socket *so, int optname, void *optval, size_t optsize,
 					TAILQ_FOREACH(net, &stcb->asoc.nets, sctp_next) {
 						if (SCTP_OS_TIMER_PENDING(&net->pmtu_timer.timer)) {
 							sctp_timer_stop(SCTP_TIMER_TYPE_PATHMTURAISE, inp, stcb, net,
-									SCTP_FROM_SCTP_USRREQ + SCTP_LOC_16);
+							                SCTP_FROM_SCTP_USRREQ + SCTP_LOC_16);
 						}
 						net->dest_state |= SCTP_ADDR_NO_PMTUD;
 						if (paddrp->spp_pathmtu > 0) {
@@ -6314,7 +6340,7 @@ sctp_setopt(struct socket *so, int optname, void *optval, size_t optsize,
 								break;
 							}
 							if (net->mtu < stcb->asoc.smallest_mtu) {
-								sctp_pathmtu_adjustment(stcb, net->mtu);
+								sctp_pathmtu_adjustment(stcb, net->mtu, true);
 							}
 						}
 					}
@@ -6591,11 +6617,11 @@ sctp_setopt(struct socket *so, int optname, void *optval, size_t optsize,
 
 		if ((stcb != NULL) && (net != NULL)) {
 			if (net != stcb->asoc.primary_destination) {
-				if (!(net->dest_state & SCTP_ADDR_UNCONFIRMED)) {
+				if ((net->dest_state & SCTP_ADDR_UNCONFIRMED) == 0) {
 					/* Ok we need to set it */
 					if (sctp_set_primary_addr(stcb, (struct sockaddr *)NULL, net) == 0) {
 						if ((stcb->asoc.alternate) &&
-						    (!(net->dest_state & SCTP_ADDR_PF)) &&
+						    ((net->dest_state & SCTP_ADDR_PF) == 0) &&
 						    (net->dest_state & SCTP_ADDR_REACHABLE)) {
 							sctp_free_remote_addr(stcb->asoc.alternate);
 							stcb->asoc.alternate = NULL;
@@ -7938,8 +7964,7 @@ sctp_connect(struct socket *so, struct mbuf *nam, struct proc *p)
 		goto out_now;
 	}
 #endif
-	if ((inp->sctp_flags & SCTP_PCB_FLAGS_UNBOUND) ==
-	    SCTP_PCB_FLAGS_UNBOUND) {
+	if (inp->sctp_flags & SCTP_PCB_FLAGS_UNBOUND) {
 		/* Bind a ephemeral port */
 		error = sctp_inpcb_bind(so, NULL, NULL, p);
 		if (error) {
@@ -8101,7 +8126,7 @@ sctpconn_connect(struct socket *so, struct sockaddr *addr)
 		goto out_now;
 	}
 #endif
-	if ((inp->sctp_flags & SCTP_PCB_FLAGS_UNBOUND) == SCTP_PCB_FLAGS_UNBOUND) {
+	if (inp->sctp_flags & SCTP_PCB_FLAGS_UNBOUND) {
 		/* Bind a ephemeral port */
 		error = sctp_inpcb_bind(so, NULL, NULL, p);
 		if (error) {
@@ -8354,6 +8379,17 @@ sctp_listen(struct socket *so, struct proc *p)
 		solisten_proto_abort(so);
 #endif
 		error = EADDRINUSE;
+		SCTP_LTRACE_ERR_RET(inp, NULL, NULL, SCTP_FROM_SCTP_USRREQ, error);
+		goto out;
+	}
+	if ((inp->sctp_flags & SCTP_PCB_FLAGS_TCPTYPE) &&
+	    ((inp->sctp_flags & SCTP_PCB_FLAGS_WAS_CONNECTED) ||
+	     (inp->sctp_flags & SCTP_PCB_FLAGS_WAS_ABORTED))) {
+		SOCK_UNLOCK(so);
+#if defined(__FreeBSD__) && !defined(__Userspace__)
+		solisten_proto_abort(so);
+#endif
+		error = EINVAL;
 		SCTP_LTRACE_ERR_RET(inp, NULL, NULL, SCTP_FROM_SCTP_USRREQ, error);
 		goto out;
 	}

@@ -251,7 +251,7 @@ sofree(struct socket *so)
 
 	ACCEPT_LOCK_ASSERT();
 	SOCK_LOCK_ASSERT(so);
-	/* SS_NOFDREF unset in accept call.  this condition seems irrelevent
+	/* SS_NOFDREF unset in accept call.  this condition seems irrelevant
 	 *  for __Userspace__...
 	 */
 	if (so->so_count != 0 ||
@@ -296,7 +296,7 @@ sofree(struct socket *so)
 	 * necessary from sorflush().
 	 *
 	 * Notice that the socket buffer and kqueue state are torn down
-	 * before calling pru_detach.  This means that protocols shold not
+	 * before calling pru_detach.  This means that protocols should not
 	 * assume they can perform socket wakeups, etc, in their detach code.
 	 */
 	sodealloc(so);
@@ -2695,22 +2695,26 @@ usrsctp_getpaddrs(struct socket *so, sctp_assoc_t id, struct sockaddr **raddrs)
 {
 	struct sctp_getaddresses *addrs;
 	struct sockaddr *sa;
-	sctp_assoc_t asoc;
 	caddr_t lim;
 	socklen_t opt_len;
+	uint32_t size_of_addresses;
 	int cnt;
 
 	if (raddrs == NULL) {
 		errno = EFAULT;
 		return (-1);
 	}
-	asoc = id;
-	opt_len = (socklen_t)sizeof(sctp_assoc_t);
-	if (usrsctp_getsockopt(so, IPPROTO_SCTP, SCTP_GET_REMOTE_ADDR_SIZE, &asoc, &opt_len) != 0) {
-		return (-1);
+	/* When calling getsockopt(), the value contains the assoc_id. */
+	size_of_addresses = (uint32_t)id;
+	opt_len = (socklen_t)sizeof(uint32_t);
+	if (usrsctp_getsockopt(so, IPPROTO_SCTP, SCTP_GET_REMOTE_ADDR_SIZE, &size_of_addresses, &opt_len) != 0) {
+		if (errno == ENOENT) {
+			return (0);
+		} else {
+			return (-1);
+		}
 	}
-	/* size required is returned in 'asoc' */
-	opt_len = (socklen_t)((size_t)asoc + sizeof(struct sctp_getaddresses));
+	opt_len = (socklen_t)((size_t)size_of_addresses + sizeof(struct sctp_getaddresses));
 	addrs = calloc(1, (size_t)opt_len);
 	if (addrs == NULL) {
 		errno = ENOMEM;
@@ -2770,10 +2774,10 @@ int
 usrsctp_getladdrs(struct socket *so, sctp_assoc_t id, struct sockaddr **raddrs)
 {
 	struct sctp_getaddresses *addrs;
-	caddr_t lim;
 	struct sockaddr *sa;
-	size_t size_of_addresses;
+	caddr_t lim;
 	socklen_t opt_len;
+	uint32_t size_of_addresses;
 	int cnt;
 
 	if (raddrs == NULL) {
@@ -2781,13 +2785,8 @@ usrsctp_getladdrs(struct socket *so, sctp_assoc_t id, struct sockaddr **raddrs)
 		return (-1);
 	}
 	size_of_addresses = 0;
-	opt_len = (socklen_t)sizeof(int);
+	opt_len = (socklen_t)sizeof(uint32_t);
 	if (usrsctp_getsockopt(so, IPPROTO_SCTP, SCTP_GET_LOCAL_ADDR_SIZE, &size_of_addresses, &opt_len) != 0) {
-		errno = ENOMEM;
-		return (-1);
-	}
-	if (size_of_addresses == 0) {
-		errno = ENOTCONN;
 		return (-1);
 	}
 	opt_len = (socklen_t)(size_of_addresses + sizeof(struct sctp_getaddresses));
@@ -2800,8 +2799,11 @@ usrsctp_getladdrs(struct socket *so, sctp_assoc_t id, struct sockaddr **raddrs)
 	/* Now lets get the array of addresses */
 	if (usrsctp_getsockopt(so, IPPROTO_SCTP, SCTP_GET_LOCAL_ADDRESSES, addrs, &opt_len) != 0) {
 		free(addrs);
-		errno = ENOMEM;
 		return (-1);
+	}
+	if (size_of_addresses == 0) {
+		free(addrs);
+		return (0);
 	}
 	*raddrs = &addrs->addr[0].sa;
 	cnt = 0;
@@ -2850,7 +2852,7 @@ usrsctp_freeladdrs(struct sockaddr *addrs)
 #ifdef INET
 void
 sctp_userspace_ip_output(int *result, struct mbuf *o_pak,
-                         sctp_route_t *ro, void *stcb,
+                         sctp_route_t *ro, void *inp,
                          uint32_t vrf_id)
 {
 	struct mbuf *m;
@@ -2991,7 +2993,7 @@ free_mbuf:
 
 #if defined(INET6)
 void sctp_userspace_ip6_output(int *result, struct mbuf *o_pak,
-                                            struct route_in6 *ro, void *stcb,
+                                            struct route_in6 *ro, void *inp,
                                             uint32_t vrf_id)
 {
 	struct mbuf *m;
@@ -3342,12 +3344,6 @@ usrsctp_conninput(void *addr, const void *buffer, size_t length, uint8_t ecn_bit
 		sctp_m_freem(m);
 	}
 	return;
-}
-
-int
-usrsctp_get_timeout(void)
-{
-	return sctp_get_next_tick();
 }
 
 void usrsctp_handle_timers(uint32_t elapsed_milliseconds)
