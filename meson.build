@@ -5,7 +5,7 @@ project('usrsctplib', 'c',
         'c_std=c99',
         'warning_level=2',
     ],
-    meson_version: '>=0.49.0')
+    meson_version: '>=0.54.0')
 
 # Shared library API and ABI versions
 # Notice: shared library version must be in X.Y.Z format only
