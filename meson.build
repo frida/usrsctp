@@ -210,6 +210,7 @@ usrsctp_dep = declare_dependency(
     compile_args: compile_args,
     include_directories: include_dirs,
     link_with: usrsctp)
+meson.override_dependency('usrsctp', usrsctp_dep)
 
 # Generate pkg-config file
 pkg = import('pkgconfig')
