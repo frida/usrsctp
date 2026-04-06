@@ -42,6 +42,10 @@ else
 endif
 add_project_arguments(compiler_args, language: 'c')
 
+if meson.is_subproject() and compiler.get_argument_syntax() != 'msvc'
+    add_project_arguments('-w', language: 'c')
+endif
+
 # Configuration
 compile_args = []
 
