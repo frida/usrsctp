@@ -5,7 +5,7 @@ project('usrsctplib', 'c',
         'c_std=c99',
         'warning_level=2',
     ],
-    meson_version: '>=0.54.0')
+    meson_version: '>=0.49.0')
 
 # Shared library API and ABI versions
 # Notice: shared library version must be in X.Y.Z format only
@@ -41,10 +41,6 @@ else
     ])
 endif
 add_project_arguments(compiler_args, language: 'c')
-
-if meson.is_subproject() and compiler.get_argument_syntax() != 'msvc'
-    add_project_arguments('-w', language: 'c')
-endif
 
 # Configuration
 compile_args = []
@@ -86,12 +82,12 @@ elif system == 'qnx'
         '-D_QNX_SOURCE',
     ], language: 'c')
 elif system == 'windows'
-    add_project_arguments('-D_WIN32_WINNT=0x0501', language: 'c')
     dependencies += compiler.find_library('ws2_32', required: true)
     dependencies += compiler.find_library('iphlpapi', required: true)
     if compiler.get_id() == 'gcc'
         add_project_arguments(compiler.get_supported_arguments([
             '-Wno-format',
+            '-D_WIN32_WINNT=0x601',  # Enables inet_ntop and friends
         ]), language: 'c')
     endif
 else
@@ -214,7 +210,6 @@ usrsctp_dep = declare_dependency(
     compile_args: compile_args,
     include_directories: include_dirs,
     link_with: usrsctp)
-meson.override_dependency('usrsctp', usrsctp_dep)
 
 # Generate pkg-config file
 pkg = import('pkgconfig')

@@ -275,6 +275,12 @@ typedef char* caddr_t;
 
 #define SCTP_GET_IF_INDEX_FROM_ROUTE(ro) 1 /* compiles...  TODO use routing socket to determine */
 
+#if defined(__APPLE__) && defined(__POWERPC__)
+#ifndef WORDS_BIGENDIAN
+#define WORDS_BIGENDIAN
+#endif
+#endif
+
 #define BIG_ENDIAN 1
 #define LITTLE_ENDIAN 0
 #ifdef WORDS_BIGENDIAN
@@ -523,8 +529,6 @@ struct sx {int dummy;};
 #endif
 #if defined(__FreeBSD__)
 #include <netinet6/in6_pcb.h>
-#include <netinet6/ip6protosw.h>
-/* #include <netinet6/nd6.h> was a 0 byte file */
 #include <netinet6/scope6_var.h>
 #endif
 #endif /* INET6 */
@@ -962,6 +966,14 @@ int sctp_userspace_get_mtu_from_ifn(uint32_t if_index);
 #define SCTP_SOWAKEUP(so)	wakeup(&(so)->so_timeo, so)
 /* number of bytes ready to read */
 #define SCTP_SBAVAIL(sb)	(sb)->sb_cc
+#define SCTP_SB_INCR(sb, incr)			\
+{						\
+	atomic_add_int(&(sb)->sb_cc, incr);	\
+}
+#define SCTP_SB_DECR(sb, decr)					\
+{								\
+	SCTP_SAVE_ATOMIC_DECREMENT(&(sb)->sb_cc, (int)(decr));	\
+}
 /* clear the socket buffer state */
 #define SCTP_SB_CLEAR(sb)	\
 	(sb).sb_cc = 0;		\
@@ -1076,8 +1088,6 @@ sctp_get_mbuf_for_msg(unsigned int space_needed, int want_header, int how, int a
 #define CMSG_ALIGN(n)   _ALIGN(n)
 #elif defined(__NetBSD__)
 #define CMSG_ALIGN(n)   (((n) + __ALIGNBYTES) & ~__ALIGNBYTES)
-#elif defined(__QNX__)
-#define CMSG_ALIGN(n)   __CMSG_ALIGN(n)
 #elif defined(__APPLE__)
 #if !defined(__DARWIN_ALIGNBYTES)
 #define	__DARWIN_ALIGNBYTES	(sizeof(__darwin_size_t) - 1)
@@ -1141,7 +1151,14 @@ sctp_get_mbuf_for_msg(unsigned int space_needed, int want_header, int how, int a
 
 #define SCTP_IS_LISTENING(inp) ((inp->sctp_flags & SCTP_PCB_FLAGS_ACCEPTING) != 0)
 
-#if defined(__APPLE__) || defined(__DragonFly__) || defined(__linux__) || defined(__native_client__) || defined(__NetBSD__) || defined(__PROSPERO__) || defined(__QNX__) || defined(_WIN32) || defined(__Fuchsia__) || defined(__EMSCRIPTEN__)
+static inline bool
+in_broadcast(struct in_addr in)
+{
+	return (in.s_addr == htonl(INADDR_BROADCAST) ||
+	        in.s_addr == htonl(INADDR_ANY));
+}
+
+#if defined(__APPLE__) || defined(__DragonFly__) || defined(__linux__) || defined(__native_client__) || defined(__NetBSD__) || defined(_WIN32) || defined(__Fuchsia__) || defined(__EMSCRIPTEN__)
 int
 timingsafe_bcmp(const void *, const void *, size_t);
 #endif
